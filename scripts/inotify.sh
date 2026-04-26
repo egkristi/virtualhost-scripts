@@ -1,61 +1,52 @@
 #!/bin/bash
-set -e
+set -euo pipefail
 
-if [ -z ${1} ]; then
-	WATCH_FOLDER="/var/www"
-else
-	WATCH_FOLDER=${1}
-fi
-if [ -z ${2} ]; then
-	TRIGGER_SCRIPT="./handle-nginx-virtualhost.sh"
-else
-	TRIGGER_SCRIPT=${2}
+WATCH_FOLDER="${1:-/var/www}"
+TRIGGER_SCRIPT="${2:-$(dirname "$0")/handle-nginx-virtualhost.sh}"
+
+if [ ! -d "${WATCH_FOLDER}" ]; then
+	echo "Error: Watch folder does not exist: ${WATCH_FOLDER}" >&2
+	exit 1
 fi
 
-monitor_folder(){
-    INOTIFY_DIR=${1}
-    EXECUTE_COMMAND=${2}
-    PIDS_PREV_INOTIFY=$(ps -ef | grep -v grep |grep "inotifywait -m -e create,delete,moved_to,moved_from ${INOTIFY_DIR}" | awk '{print $2}')
-    echo ${PIDS_PREV_INOTIFY}
-    if [ ! -z "${PIDS_PREV_INOTIFY}" ]; then
-        for PID_PREV_INOTIFY in $PIDS_PREV_INOTIFY
-        do
-            echo "Killing ${PID_PREV_INOTIFY}"
-            kill -9 ${PID_PREV_INOTIFY}
-        done
-    fi
-    inotifywait -m -e create,delete,moved_to,moved_from "${INOTIFY_DIR}" | while read WATCHED_FOLDER EVENT CHANGED
-    do
-		case ${EVENT} in
-			"CREATE,ISDIR")
-				. ${EXECUTE_COMMAND} ${WATCHED_FOLDER} ${EVENT} ${CHANGED}
-			;;
-			"DELETE,ISDIR")
-				. ${EXECUTE_COMMAND} ${WATCHED_FOLDER} ${EVENT} ${CHANGED}
-			;;
-			"MOVED_TO,ISDIR")
-				. ${EXECUTE_COMMAND} ${WATCHED_FOLDER} ${EVENT} ${CHANGED}
-			;;
-			"MOVED_FROM,ISDIR")
-				. ${EXECUTE_COMMAND} ${WATCHED_FOLDER} ${EVENT} ${CHANGED}
-			;;
-			"CREATE")
-				#. ${EXECUTE_COMMAND} ${WATCHED_FOLDER} ${EVENT} ${CHANGED}
-			;;
-			"DELETE")
-				#. ${EXECUTE_COMMAND} ${WATCHED_FOLDER} ${EVENT} ${CHANGED}
-			;;
-			"MOVED_TO")
-				#. ${EXECUTE_COMMAND} ${WATCHED_FOLDER} ${EVENT} ${CHANGED}
-			;;
-			"MOVED_FROM")
-				#. ${EXECUTE_COMMAND} ${WATCHED_FOLDER} ${EVENT} ${CHANGED}
-			;;
-			*)
-				echo "unknown inotify event"
-			;;
-		esac
-    done
+if [ ! -f "${TRIGGER_SCRIPT}" ]; then
+	echo "Error: Trigger script not found: ${TRIGGER_SCRIPT}" >&2
+	exit 1
+fi
+
+if ! command -v inotifywait &>/dev/null; then
+	echo "Error: inotifywait not found. Install inotify-tools:" >&2
+	echo "  apt-get install inotify-tools" >&2
+	exit 1
+fi
+
+monitor_folder() {
+	local INOTIFY_DIR="$1"
+	local EXECUTE_COMMAND="$2"
+
+	# Kill any existing inotifywait process watching the same directory
+	if command -v pgrep &>/dev/null; then
+		pgrep -f "inotifywait.*${INOTIFY_DIR}" | while read -r PID; do
+			echo "Stopping existing watcher (PID ${PID})"
+			kill "${PID}" 2>/dev/null || true
+		done
+		sleep 1
+	fi
+
+	echo "Watching ${INOTIFY_DIR} for directory changes..."
+	inotifywait -m -e create,delete,moved_to,moved_from "${INOTIFY_DIR}" |
+		while read -r WATCHED_FOLDER EVENT CHANGED; do
+			case "${EVENT}" in
+				"CREATE,ISDIR"|"DELETE,ISDIR"|"MOVED_TO,ISDIR"|"MOVED_FROM,ISDIR")
+					echo "[$(date '+%Y-%m-%d %H:%M:%S')] ${EVENT}: ${CHANGED}"
+					bash "${EXECUTE_COMMAND}" "${WATCHED_FOLDER}" "${EVENT}" "${CHANGED}"
+					;;
+				*)
+					# Ignore non-directory events silently
+					;;
+			esac
+		done
 }
 
-monitor_folder ${WATCH_FOLDER} ${TRIGGER_SCRIPT} &
+monitor_folder "${WATCH_FOLDER}" "${TRIGGER_SCRIPT}" &
+echo "Monitor started in background (PID $!)"
